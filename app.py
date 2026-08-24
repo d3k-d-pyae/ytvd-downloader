@@ -18,6 +18,18 @@ JOBS_LOCK = threading.Lock()
 app = Flask(__name__, static_folder="public", static_url_path="")
 
 
+def cookie_file():
+    candidates = [
+        os.environ.get("COOKIES_FILE"),
+        "/etc/secrets/cookies.txt",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
 def base_opts():
     opts = {
         "quiet": True,
@@ -27,6 +39,9 @@ def base_opts():
         "retries": 3,
         "js_runtimes": {"node": {}},
     }
+    cookies = cookie_file()
+    if cookies:
+        opts["cookiefile"] = cookies
     return opts
 
 
