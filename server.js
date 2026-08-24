@@ -481,7 +481,10 @@ app.post("/api/info", async (req, res) => {
       signedIn: Boolean(process.env.YOUTUBE_COOKIE),
     });
   } catch (err) {
-    return res.status(400).json({ error: cleanError(err) });
+    return res.status(400).json({
+      error: cleanError(err),
+      cookieConfigured: Boolean(process.env.YOUTUBE_COOKIE),
+    });
   }
 });
 
