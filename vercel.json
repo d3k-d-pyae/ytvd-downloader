@@ -2,10 +2,7 @@
   "functions": {
     "server.js": {
       "maxDuration": 300,
-      "includeFiles": [
-        "node_modules/ffmpeg-static/ffmpeg",
-        "node_modules/youtubei.js/**"
-      ]
+      "includeFiles": "node_modules/ffmpeg-static/ffmpeg"
     }
   }
 }
