@@ -77,7 +77,7 @@ function getSession() {
     ytSessionPromise = (async () => {
       const mod = await import("youtubei.js");
       const { Innertube, ClientType } = mod.Innertube ? mod : mod.default;
-      return Innertube.create({ client_type: ClientType.IOS });
+      return Innertube.create({ client_type: ClientType.ANDROID_VR });
     })().catch((err) => {
       ytSessionPromise = null;
       throw err;
