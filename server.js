@@ -504,8 +504,12 @@ function lanIp() {
   return real || candidates[0] || "127.0.0.1";
 }
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`YT Downloader running (Node.js + youtubei.js, iOS client) (ffmpeg: ${HAS_FFMPEG ? "yes" : "no"})`);
-  console.log(`  Local:   http://127.0.0.1:${PORT}`);
-  console.log(`  Network: http://${lanIp()}:${PORT}`);
-});
+if (!IS_VERCEL) {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`YT Downloader running (Node.js + youtubei.js, iOS client) (ffmpeg: ${HAS_FFMPEG ? "yes" : "no"})`);
+    console.log(`  Local:   http://127.0.0.1:${PORT}`);
+    console.log(`  Network: http://${lanIp()}:${PORT}`);
+  });
+}
+
+module.exports = app;
