@@ -1,0 +1,14 @@
+{
+  "name": "yt-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web-based YouTube video downloader with quality selection",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "youtubei.js": "^18.0.0"
+  }
+}

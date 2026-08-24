@@ -1,0 +1,435 @@
+"use strict";
+
+const crypto = require("crypto");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { spawn, spawnSync } = require("child_process");
+const { Readable, Transform } = require("stream");
+const { pipeline } = require("stream/promises");
+
+const express = require("express");
+const { Innertube, ClientType } = require("youtubei.js");
+
+const BASE_DIR = __dirname;
+const DOWNLOAD_DIR = path.join(BASE_DIR, "downloads");
+const STATIC_DIR = path.join(BASE_DIR, "static");
+fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+
+const PORT = 5000;
+
+function hasFFmpeg() {
+  try {
+    const result = spawnSync("ffmpeg", ["-version"], { windowsHide: true, stdio: "ignore" });
+    return !result.error;
+  } catch {
+    return false;
+  }
+}
+
+const HAS_FFMPEG = hasFFmpeg();
+
+/** Lazily created shared InnerTube session (fetches YouTube's player once). */
+let ytSessionPromise = null;
+// The WEB client enforces PO tokens and returns formats without usable stream
+// URLs; the iOS client still serves plain, ready-to-use URLs.
+function getSession() {
+  if (!ytSessionPromise) ytSessionPromise = Innertube.create({ client_type: ClientType.IOS });
+  return ytSessionPromise;
+}
+
+function extractVideoId(raw) {
+  const input = String(raw || "").trim();
+  if (/^[\w-]{11}$/.test(input)) return input;
+  try {
+    const u = new URL(input);
+    if (u.hostname.endsWith("youtu.be")) return u.pathname.slice(1).split("/")[0];
+    const shorts = u.pathname.match(/^\/(shorts|embed|live)\/([\w-]{11})/);
+    if (shorts) return shorts[2];
+    const v = u.searchParams.get("v");
+    if (v && /^[\w-]{11}$/.test(v)) return v;
+  } catch {
+    /* fall through */
+  }
+  return null;
+}
+
+function cleanError(err) {
+  let message = (err && err.message ? String(err.message) : String(err)).split("\n")[0].trim();
+  if (message.startsWith("Error: ")) message = message.slice(7);
+  return message.slice(0, 300) || "Unknown error.";
+}
+
+function sanitizeName(title) {
+  const cleaned = String(title || "video")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.slice(0, 140) || "video";
+}
+
+function bestThumb(thumbnail) {
+  let best = null;
+  for (const t of (thumbnail && thumbnail.thumbnails) || []) {
+    if (!t || !t.url) continue;
+    if (!best || (t.width || 0) >= (best.width || 0)) best = t;
+  }
+  return best ? best.url : null;
+}
+
+/** Flatten a raw /player format into the small shape this app uses. */
+function normalizeFormat(raw) {
+  const mime = String(raw.mimeType || "");
+  const seconds = Number(raw.approxDurationMs) > 0 ? Number(raw.approxDurationMs) / 1000 : null;
+  let size = Number(raw.contentLength ?? raw.filesize ?? 0);
+  if (!size && raw.bitrate && seconds) size = Math.round((raw.bitrate * seconds) / 8);
+  return {
+    mime,
+    isVideo: mime.startsWith("video/"),
+    isAudio: mime.startsWith("audio/"),
+    height: raw.height ?? null,
+    bitrate: Number(raw.bitrate) || 0,
+    size: size > 0 ? size : null,
+    url: raw.url || null,
+  };
+}
+
+/**
+ * Call the InnerTube /player endpoint directly and read the raw response.
+ * Deliberately bypasses youtubei.js getInfo(): its node parser crashes on
+ * several clients, while the raw JSON carries everything we need.
+ */
+async function fetchPlayer(videoId) {
+  const session = await getSession();
+  const res = await session.actions.execute("/player", {
+    videoId,
+    contentCheckOk: true,
+    racyCheckOk: true,
+  });
+  const data = res.data || res;
+  const status = data.playabilityStatus || {};
+  if (status.status && status.status !== "OK") {
+    throw new Error(status.reason || "This video is unavailable.");
+  }
+  const details = data.videoDetails;
+  if (!details) throw new Error("YouTube did not return video details.");
+  const streaming = data.streamingData || {};
+  const formats = [...(streaming.adaptiveFormats || []), ...(streaming.formats || [])]
+    .map(normalizeFormat)
+    .filter((f) => f.url);
+  if (!formats.length) throw new Error("No downloadable streams were returned for this video.");
+  return {
+    id: details.videoId || videoId,
+    title: details.title || "video",
+    uploader: details.author || null,
+    duration: Number(details.lengthSeconds) || null,
+    thumbnail: bestThumb(details.thumbnail),
+    formats,
+  };
+}
+
+function buildQualities(formats) {
+  const bestByHeight = new Map();
+  for (const f of formats) {
+    if (!f.isVideo || !f.height) continue;
+    const current = bestByHeight.get(f.height);
+    if (!current || (f.size || 0) > (current.size || 0)) bestByHeight.set(f.height, f);
+  }
+
+  const qualities = [...bestByHeight.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([height, f]) => ({ label: `${height}p`, height, filesize: f.size }));
+
+  let audio = null;
+  for (const f of formats) {
+    if (!f.isAudio || f.isVideo) continue;
+    if (!audio || (f.size || 0) > (audio.size || 0)) audio = f;
+  }
+  qualities.push({ label: "mp3", height: null, filesize: audio ? audio.size : null });
+  return qualities;
+}
+
+function pickVideo(formats, maxHeight) {
+  const list = formats.filter((f) => f.isVideo && f.height && f.height <= maxHeight);
+  if (!list.length) throw new Error(`No video format up to ${maxHeight}p is available.`);
+  list.sort(
+    (a, b) =>
+      b.height - a.height ||
+      (a.mime.includes("mp4") ? 0 : 1) - (b.mime.includes("mp4") ? 0 : 1) ||
+      b.bitrate - a.bitrate
+  );
+  return list[0];
+}
+
+function pickAudio(formats) {
+  const list = formats.filter((f) => f.isAudio && !f.isVideo);
+  if (!list.length) throw new Error("No audio stream is available.");
+  list.sort((a, b) => b.bitrate - a.bitrate || (b.size || 0) - (a.size || 0));
+  return list[0];
+}
+
+function makeSpeedo(totalBytes) {
+  let lastTime = Date.now();
+  let lastBytes = 0;
+  let speed = 0;
+  return (done) => {
+    const now = Date.now();
+    const dt = (now - lastTime) / 1000;
+    if (dt >= 0.5) {
+      const instant = (done - lastBytes) / dt;
+      speed = speed ? speed * 0.7 + instant * 0.3 : instant;
+      lastTime = now;
+      lastBytes = done;
+    }
+    return {
+      speed: speed > 0 ? Math.round(speed) : null,
+      eta: speed > 0 && totalBytes > done ? Math.round((totalBytes - done) / speed) : null,
+    };
+  };
+}
+
+async function downloadUrl(url, destPath, onProgress) {
+  const res = await fetch(url);
+  if (!res.ok || !res.body) throw new Error(`Stream request failed (HTTP ${res.status}).`);
+  const headerTotal = Number(res.headers.get("content-length") || 0);
+  let done = 0;
+  const counter = new Transform({
+    transform(chunk, _enc, cb) {
+      done += chunk.length;
+      try {
+        onProgress(done, headerTotal);
+      } catch {
+        /* progress reporting must never kill the download */
+      }
+      cb(null, chunk);
+    },
+  });
+  await pipeline(Readable.fromWeb(res.body), counter, fs.createWriteStream(destPath));
+}
+
+function runFFmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("ffmpeg", args, { windowsHide: true });
+    let stderr = "";
+    proc.stderr.on("data", (d) => {
+      stderr += d;
+      if (stderr.length > 8000) stderr = stderr.slice(-4000);
+    });
+    proc.on("error", () => reject(new Error("ffmpeg not found. Install ffmpeg and restart.")));
+    proc.on("close", (code) => {
+      if (code === 0) return resolve();
+      const line = stderr.trim().split("\n").pop() || "";
+      reject(new Error(`ffmpeg failed (${code}): ${line}`.slice(0, 300)));
+    });
+  });
+}
+
+function removeQuiet(file) {
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    /* best-effort temp cleanup */
+  }
+}
+
+async function runJob(state, videoId, quality) {
+  const tempFiles = [];
+  try {
+    const media = await fetchPlayer(videoId);
+    state.title = media.title;
+    const baseName = `${sanitizeName(media.title)} [${media.id}]`;
+
+    if (quality === "mp3") {
+      if (!HAS_FFMPEG) throw new Error("MP3 extraction requires ffmpeg on this machine.");
+      const audio = pickAudio(media.formats);
+      const audioPath = path.join(DOWNLOAD_DIR, `${state.download_id}.audio.tmp`);
+      tempFiles.push(audioPath);
+
+      const total = Number(audio.size || 0);
+      const speedo = makeSpeedo(total || 1);
+      await downloadUrl(audio.url, audioPath, (done, headerTotal) => {
+        const known = total || headerTotal;
+        const s = speedo(done);
+        state.speed = s.speed;
+        state.eta = s.eta;
+        if (known) state.progress = Math.min(99.9, Math.round((done / known) * 990) / 10);
+      });
+
+      state.status = "processing";
+      state.speed = null;
+      state.eta = null;
+      const outPath = path.join(DOWNLOAD_DIR, `${baseName}.mp3`);
+      await runFFmpeg(["-y", "-i", audioPath, "-vn", "-codec:a", "libmp3lame", "-q:a", "0", outPath]);
+      state.filename = path.basename(outPath);
+    } else {
+      const height = parseInt(quality, 10);
+      const video = pickVideo(media.formats, height);
+      const audio = pickAudio(media.formats);
+
+      const videoPath = path.join(DOWNLOAD_DIR, `${state.download_id}.video.tmp`);
+      const audioPath = path.join(DOWNLOAD_DIR, `${state.download_id}.audio.tmp`);
+      tempFiles.push(videoPath, audioPath);
+
+      const vTotal = Number(video.size || 0);
+      const aTotal = Number(audio.size || 0);
+      const grandTotal = vTotal + aTotal || 1;
+      const speedo = makeSpeedo(grandTotal);
+      let vDone = 0;
+      let aDone = 0;
+      const update = () => {
+        const s = speedo(vDone + aDone);
+        state.speed = s.speed;
+        state.eta = s.eta;
+        state.progress = Math.min(99.9, Math.round(((vDone + aDone) / grandTotal) * 990) / 10);
+      };
+
+      await Promise.all([
+        downloadUrl(video.url, videoPath, (done) => {
+          vDone = done;
+          update();
+        }),
+        downloadUrl(audio.url, audioPath, (done) => {
+          aDone = done;
+          update();
+        }),
+      ]);
+
+      state.status = "processing";
+      state.speed = null;
+      state.eta = null;
+      const mergedExt =
+        String(video.mime || "").includes("mp4") && String(audio.mime || "").includes("mp4")
+          ? "mp4"
+          : "mkv";
+      const outPath = path.join(DOWNLOAD_DIR, `${baseName}.${mergedExt}`);
+      const args = ["-y", "-i", videoPath, "-i", audioPath, "-c", "copy"];
+      if (mergedExt === "mp4") args.push("-movflags", "+faststart");
+      args.push(outPath);
+      await runFFmpeg(args);
+      state.filename = path.basename(outPath);
+    }
+
+    state.status = "finished";
+    state.progress = 100;
+    state.error = null;
+  } catch (err) {
+    state.status = "error";
+    state.speed = null;
+    state.eta = null;
+    state.error = cleanError(err);
+  } finally {
+    for (const file of tempFiles) removeQuiet(file);
+  }
+}
+
+const app = express();
+app.use(express.json());
+app.use("/static", express.static(STATIC_DIR));
+
+/** download_id -> state */
+const downloads = new Map();
+
+function newState(id) {
+  return {
+    download_id: id,
+    status: "downloading",
+    progress: 0,
+    speed: null,
+    eta: null,
+    title: null,
+    filename: null,
+    error: null,
+  };
+}
+
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(STATIC_DIR, "index.html"));
+});
+
+app.post("/api/info", async (req, res) => {
+  const url = String((req.body && req.body.url) || "").trim();
+  if (!url) return res.status(400).json({ error: "Missing video URL." });
+  const videoId = extractVideoId(url);
+  if (!videoId) return res.status(400).json({ error: "That does not look like a YouTube URL." });
+  try {
+    const media = await fetchPlayer(videoId);
+    res.json({
+      id: media.id,
+      title: media.title,
+      uploader: media.uploader,
+      duration: media.duration,
+      thumbnail: media.thumbnail,
+      qualities: buildQualities(media.formats),
+    });
+  } catch (err) {
+    return res.status(400).json({ error: cleanError(err) });
+  }
+});
+
+app.post("/api/download", (req, res) => {
+  const body = req.body || {};
+  const url = String(body.url || "").trim();
+  const quality = String(body.quality || "").trim().toLowerCase();
+
+  if (!url) return res.status(400).json({ error: "Missing video URL." });
+  const videoId = extractVideoId(url);
+  if (!videoId) return res.status(400).json({ error: "That does not look like a YouTube URL." });
+
+  const isMp3 = quality === "mp3";
+  let height = null;
+  if (!isMp3) {
+    const match = /^(\d+)p$/.exec(quality);
+    if (!match) return res.status(400).json({ error: `Unknown quality '${quality}'.` });
+    height = parseInt(match[1], 10);
+  }
+  if (isMp3 && !HAS_FFMPEG) {
+    return res.status(400).json({ error: "MP3 extraction requires ffmpeg on this machine." });
+  }
+
+  const id = crypto.randomBytes(16).toString("hex");
+  const state = newState(id);
+  downloads.set(id, state);
+  runJob(state, videoId, quality);
+  res.json({ download_id: id, status: "started" });
+});
+
+app.get("/api/progress/:id", (req, res) => {
+  const state = downloads.get(req.params.id);
+  if (!state) return res.status(404).json({ error: "unknown download id" });
+  res.json(state);
+});
+
+app.get("/api/file/:id", (req, res) => {
+  const state = downloads.get(req.params.id);
+  if (!state) return res.status(404).json({ error: "unknown download id" });
+  if (state.status !== "finished") return res.status(409).json({ error: "not finished" });
+  if (!state.filename) return res.status(404).json({ error: "file missing" });
+  const filePath = path.join(DOWNLOAD_DIR, state.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: "file missing" });
+  res.download(filePath, state.filename);
+});
+
+// JSON error handler (bad request bodies etc.)
+app.use((err, _req, res, _next) => {
+  res.status(400).json({ error: err instanceof SyntaxError ? "Invalid JSON body." : "Request failed." });
+});
+
+function lanIp() {
+  const candidates = [];
+  for (const nets of Object.values(os.networkInterfaces())) {
+    for (const net of nets || []) {
+      if (net.family === "IPv4" && !net.internal) candidates.push(net.address);
+    }
+  }
+  // Skip VirtualBox host-only and link-local ranges so phones reach the app.
+  const real = candidates.find(
+    (ip) => !ip.startsWith("192.168.56.") && !ip.startsWith("169.254.")
+  );
+  return real || candidates[0] || "127.0.0.1";
+}
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`YT Downloader running (Node.js + youtubei.js, iOS client) (ffmpeg: ${HAS_FFMPEG ? "yes" : "no"})`);
+  console.log(`  Local:   http://127.0.0.1:${PORT}`);
+  console.log(`  Network: http://${lanIp()}:${PORT}`);
+});
