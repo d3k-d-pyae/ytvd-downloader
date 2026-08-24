@@ -1,6 +1,6 @@
 # YTVdDownloader
 
-A lightweight, self-hosted web app for downloading YouTube videos and audio. Paste a link, pick a quality, and grab an MP4/MKV or extract MP3 audio, all through a simple browser interface that also works from phones on your local network.
+A lightweight YouTube downloader with a simple browser UI. Paste a link, pick a quality, and grab an MP4/MKV or extract MP3 audio. Runs anywhere Streamlit runs - including a free [Streamlit Community Cloud](https://share.streamlit.io) deployment.
 
 ## Features
 
@@ -8,73 +8,58 @@ A lightweight, self-hosted web app for downloading YouTube videos and audio. Pas
 - Video metadata preview: title, uploader, duration, thumbnail
 - Per-quality selection for every resolution YouTube serves
 - MP3 extraction at highest VBR quality
-- Live progress bar with speed and ETA
+- Live progress bar during download and processing
 - Files are named after the video title when saved by your browser
-- Stream-once delivery: nothing is kept on the server after you download it
-- LAN friendly: start it once and download from any device on your network
+- Nothing is kept on the server: each download is temporary and cleaned up immediately
 
 ## Tech Stack
 
-- **Backend:** Python 3.12, Flask, waitress
+- **UI + server:** Streamlit
 - **YouTube extraction:** [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-- **Media processing:** ffmpeg (system binary)
-- **Deployment:** Docker
+- **Media processing:** ffmpeg (system package)
 
-## Getting Started (native)
+## Deploy on Streamlit Community Cloud
 
-Requires Python 3.10+ and ffmpeg on your PATH.
+1. Fork or push this repo to GitHub.
+2. At [share.streamlit.io](https://share.streamlit.io), click **New app**, pick the repo and branch.
+3. Set **Main file path** to `streamlit_app.py` and click **Deploy**.
+
+That's it - `requirements.txt` installs the Python dependencies, and `packages.txt` tells the cloud to apt-install `ffmpeg` and `nodejs` (both required by yt-dlp).
+
+## Run locally
+
+Requires Python 3.10+. ffmpeg and node are needed on your PATH (on Windows: `winget install Gyan.FFmpeg Node.js`).
 
 ```bash
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt   # Windows
 .venv/bin/python -m pip install -r requirements.txt       # macOS/Linux
-.venv\Scripts\python app.py                               # or .venv/bin/python app.py
+.venv\Scripts\python -m streamlit run streamlit_app.py    # or .venv/bin/python ...
 ```
 
-Then open:
-
-```
-Local:   http://127.0.0.1:5000
-Network: http://<your-lan-ip>:5000
-```
-
-## Running with Docker
+Then open http://localhost:8501. To reach the app from other devices on your network:
 
 ```bash
-docker build -t ytvd-downloader .
-docker run -d --name ytvd -p 5000:5000 ytvd-downloader
+.venv\Scripts\python -m streamlit run streamlit_app.py --server.address 0.0.0.0
 ```
-
-The image bundles ffmpeg and a JavaScript runtime (required by recent yt-dlp for YouTube extraction), so no host dependencies are needed. Set `-e PORT=8080` and `-p 8080:8080` to change the port.
-
-Processed files are streamed straight to your browser as a download; the server keeps no copy. Where they land is up to your browser settings - enable "Ask where to save each file" in Chrome (or the equivalent elsewhere) to pick a folder every time.
 
 ## How It Works
 
-1. `/api/info` asks yt-dlp for the format list and shows every available video height plus an MP3 option with expected sizes (bitrate-estimated where YouTube omits exact sizes).
-2. On download, yt-dlp grabs the best video track up to the chosen height plus best audio, merging them with ffmpeg (MP4 preferred, MKV fallback). MP3 jobs transcode the best audio stream at VBR quality 0.
-3. Progress is reported live through `/api/progress/:id`; the finished file streams once through `/api/file/:id` and is deleted from the server the moment delivery completes.
-
-## API
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/` | Web UI |
-| POST | `/api/info` | Body `{ "url": "..." }`, returns metadata plus available qualities |
-| POST | `/api/download` | Body `{ "url": "...", "quality": "720p" }` or `"mp3"`, returns a `download_id` |
-| GET | `/api/progress/:id` | Live job state: progress %, speed, ETA, status, filename |
-| GET | `/api/file/:id` | Streams the finished file as an attachment; single-use (409 afterwards) |
+1. Pasting a URL asks yt-dlp for the format list; every available video height plus an MP3 option is shown with expected sizes (bitrate-estimated where YouTube omits exact sizes).
+2. Downloading grabs the best video track up to the chosen height plus best audio, merging them with ffmpeg (MP4 preferred, MKV fallback). MP3 jobs transcode the best audio stream at VBR quality 0.
+3. The finished file is offered through the browser's save dialog; the temporary copy is deleted the moment it is delivered.
 
 ## Project Structure
 
 ```
-app.py            Flask server and download pipeline
-public/           Frontend (vanilla HTML/CSS/JS)
+streamlit_app.py  The whole app: yt-dlp pipeline + Streamlit UI
 requirements.txt  Python dependencies
-Dockerfile        Container image (ffmpeg + JS runtime included)
+packages.txt      apt packages for Streamlit Cloud (ffmpeg, nodejs)
 ```
 
 ## Notes
 
+- Keep downloads under ~450 MB; larger results exceed what the app can hand through the browser session.
 - YouTube changes its internals regularly; keeping `yt-dlp` updated (`pip install -U yt-dlp`) fixes most breakages.
+- Cloud providers' IPs sometimes get bot-checked by YouTube regardless of this app; running locally is always the most reliable option.
 - Only download content you have the rights to; this tool is for personal use.

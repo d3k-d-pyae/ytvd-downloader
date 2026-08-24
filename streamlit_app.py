@@ -6,9 +6,55 @@ import tempfile
 import streamlit as st
 import yt_dlp
 
-from app import base_opts, build_qualities
-
 st.set_page_config(page_title="YT Downloader", page_icon=None)
+
+
+def clean_error(err):
+    return str(err).splitlines()[0].strip()
+
+
+def base_opts():
+    return {
+        "quiet": True,
+        "no_warnings": False,
+        "noplaylist": True,
+        "socket_timeout": 30,
+        "retries": 3,
+        "js_runtimes": {"node": {}},
+    }
+
+
+def format_size(fmt, duration):
+    size = fmt.get("filesize") or fmt.get("filesize_approx")
+    if not size:
+        rate = fmt.get("tbr") or fmt.get("abr")
+        if rate and duration:
+            size = math.ceil(rate * 1000 * duration / 8)
+    return size
+
+
+def build_qualities(info):
+    duration = info.get("duration")
+    best_by_height = {}
+    for fmt in info.get("formats") or []:
+        if fmt.get("vcodec") == "none" or not fmt.get("height"):
+            continue
+        current = best_by_height.get(fmt["height"])
+        if not current or (format_size(fmt, duration) or 0) > (format_size(current, duration) or 0):
+            best_by_height[fmt["height"]] = fmt
+    qualities = [
+        {"label": f"{height}p", "height": height, "filesize": format_size(fmt, duration)}
+        for height, fmt in sorted(best_by_height.items(), reverse=True)
+    ]
+    audios = [f for f in info.get("formats") or [] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+    if not audios:
+        audios = [f for f in info.get("formats") or [] if f.get("acodec") != "none"]
+    if audios:
+        best_audio = max(audios, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+        qualities.append(
+            {"label": "mp3", "height": None, "filesize": format_size(best_audio, duration)}
+        )
+    return qualities
 
 
 def human_size(n):
