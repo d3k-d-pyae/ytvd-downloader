@@ -69,11 +69,14 @@ const HAS_FFMPEG = hasFFmpeg();
 let ytSessionPromise = null;
 // The WEB client enforces PO tokens and returns formats without usable stream
 // URLs; the iOS client still serves plain, ready-to-use URLs.
-// youtubei.js is required on first use so a failed import cannot crash boot.
+// youtubei.js is loaded with import(): its node entry is ESM-only, which
+// require() cannot consume on runtimes like Vercel's, and loading it lazily
+// also keeps a failed import from crashing boot.
 function getSession() {
   if (!ytSessionPromise) {
     ytSessionPromise = (async () => {
-      const { Innertube, ClientType } = require("youtubei.js");
+      const mod = await import("youtubei.js");
+      const { Innertube, ClientType } = mod.Innertube ? mod : mod.default;
       return Innertube.create({ client_type: ClientType.IOS });
     })().catch((err) => {
       ytSessionPromise = null;
