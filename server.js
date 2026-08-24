@@ -95,10 +95,12 @@ function signedCookie() {
 
 /** Lazily created shared InnerTube session (fetches YouTube's player once). */
 let ytSessionPromise = null;
+let activeClientName = null;
 // Client choice is empirical: the iOS client serves ready-to-use stream URLs
 // but rejects cookies with HTTP 400, while the Android VR client accepts the
 // identity-cookie subset and keeps serving plain URLs, so deciphering is
-// never needed.
+// never needed. YOUTUBE_CLIENT forces any youtubei.js client name, which is
+// how we recover when YouTube starts challenging a specific client.
 // youtubei.js is loaded with import(): its node entry is ESM-only, which
 // require() cannot consume on runtimes like Vercel's, and loading it lazily
 // also keeps a failed import from crashing boot.
@@ -108,7 +110,12 @@ function getSession() {
       const mod = await import("youtubei.js");
       const { Innertube, ClientType } = mod.Innertube ? mod : mod.default;
       const cookie = signedCookie();
-      const opts = { client_type: cookie ? ClientType.ANDROID_VR : ClientType.IOS };
+      const forcedName = process.env.YOUTUBE_CLIENT;
+      const forced = forcedName && ClientType[forcedName] ? ClientType[forcedName] : null;
+      activeClientName = forcedName && forced ? forcedName : cookie ? "ANDROID_VR" : "IOS";
+      const opts = {
+        client_type: forced ?? (cookie ? ClientType.ANDROID_VR : ClientType.IOS),
+      };
       if (cookie) opts.cookie = cookie;
       return Innertube.create(opts);
     })().catch((err) => {
@@ -484,6 +491,7 @@ app.post("/api/info", async (req, res) => {
     return res.status(400).json({
       error: cleanError(err),
       cookieConfigured: Boolean(process.env.YOUTUBE_COOKIE),
+      clientUsed: activeClientName,
     });
   }
 });
