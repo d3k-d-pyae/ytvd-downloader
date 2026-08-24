@@ -65,10 +65,40 @@ function hasFFmpeg() {
 
 const HAS_FFMPEG = hasFFmpeg();
 
+/**
+ * Identity-only cookie subset. Full browser cookie strings break mobile
+ * InnerTube clients outright (the iOS endpoint answers HTTP 400), while this
+ * subset is accepted and carries the actual sign-in state.
+ */
+const CORE_COOKIES = [
+  "SID=",
+  "HSID=",
+  "SSID=",
+  "APISID=",
+  "SAPISID=",
+  "__Secure-1PSID=",
+  "__Secure-3PSID=",
+  "LOGIN_INFO=",
+  "__Secure-1PSIDTS=",
+  "__Secure-3PSIDTS=",
+];
+
+function signedCookie() {
+  const raw = process.env.YOUTUBE_COOKIE;
+  if (!raw) return "";
+  return raw
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => CORE_COOKIES.some((name) => part.startsWith(name)))
+    .join("; ");
+}
+
 /** Lazily created shared InnerTube session (fetches YouTube's player once). */
 let ytSessionPromise = null;
-// The WEB client enforces PO tokens and returns formats without usable stream
-// URLs; the iOS client still serves plain, ready-to-use URLs.
+// Client choice is empirical: the iOS client serves ready-to-use stream URLs
+// but rejects cookies with HTTP 400, while the Android VR client accepts the
+// identity-cookie subset and keeps serving plain URLs, so deciphering is
+// never needed.
 // youtubei.js is loaded with import(): its node entry is ESM-only, which
 // require() cannot consume on runtimes like Vercel's, and loading it lazily
 // also keeps a failed import from crashing boot.
@@ -77,7 +107,10 @@ function getSession() {
     ytSessionPromise = (async () => {
       const mod = await import("youtubei.js");
       const { Innertube, ClientType } = mod.Innertube ? mod : mod.default;
-      return Innertube.create({ client_type: ClientType.IOS });
+      const cookie = signedCookie();
+      const opts = { client_type: cookie ? ClientType.ANDROID_VR : ClientType.IOS };
+      if (cookie) opts.cookie = cookie;
+      return Innertube.create(opts);
     })().catch((err) => {
       ytSessionPromise = null;
       throw err;
@@ -125,8 +158,10 @@ function bestThumb(thumbnail) {
   return best ? best.url : null;
 }
 
-/** Flatten a raw /player format into the small shape this app uses. */
-function normalizeFormat(raw) {
+/** Flatten a raw /player format into the small shape this app uses.
+ * `progressive` marks tracks from streamingData.formats (video+audio muxed),
+ * which some clients refuse to serve even though they are advertised. */
+function normalizeFormat(raw, progressive) {
   const mime = String(raw.mimeType || "");
   const seconds = Number(raw.approxDurationMs) > 0 ? Number(raw.approxDurationMs) / 1000 : null;
   let size = Number(raw.contentLength ?? raw.filesize ?? 0);
@@ -139,13 +174,16 @@ function normalizeFormat(raw) {
     bitrate: Number(raw.bitrate) || 0,
     size: size > 0 ? size : null,
     url: raw.url || null,
+    progressive: Boolean(progressive),
   };
 }
 
 /**
  * Call the InnerTube /player endpoint directly and read the raw response.
  * Deliberately bypasses youtubei.js getInfo(): its node parser crashes on
- * several clients, while the raw JSON carries everything we need.
+ * several clients' responses, while the raw JSON carries everything we need -
+ * including plain stream URLs on both the iOS client and, when signed in,
+ * the Android VR client.
  */
 async function fetchPlayer(videoId) {
   const session = await getSession();
@@ -177,9 +215,11 @@ async function fetchPlayer(videoId) {
 }
 
 function buildQualities(formats) {
+  let pool = formats.filter((f) => f.isVideo && f.height);
+  const adaptive = pool.filter((f) => !f.progressive);
+  if (adaptive.length) pool = adaptive;
   const bestByHeight = new Map();
-  for (const f of formats) {
-    if (!f.isVideo || !f.height) continue;
+  for (const f of pool) {
     const current = bestByHeight.get(f.height);
     if (!current || (f.size || 0) > (current.size || 0)) bestByHeight.set(f.height, f);
   }
@@ -198,8 +238,12 @@ function buildQualities(formats) {
 }
 
 function pickVideo(formats, maxHeight) {
-  const list = formats.filter((f) => f.isVideo && f.height && f.height <= maxHeight);
+  let list = formats.filter((f) => f.isVideo && f.height && f.height <= maxHeight);
   if (!list.length) throw new Error(`No video format up to ${maxHeight}p is available.`);
+  // Progressive tracks (itag 18/22) can come back 403-blocked on some clients;
+  // identical-height adaptive tracks stream fine, so prefer them.
+  const adaptive = list.filter((f) => !f.progressive);
+  if (adaptive.length) list = adaptive;
   list.sort(
     (a, b) =>
       b.height - a.height ||
@@ -434,6 +478,7 @@ app.post("/api/info", async (req, res) => {
       thumbnail: media.thumbnail,
       qualities: buildQualities(media.formats),
       mode: IS_VERCEL ? "direct" : "job",
+      signedIn: Boolean(process.env.YOUTUBE_COOKIE),
     });
   } catch (err) {
     return res.status(400).json({ error: cleanError(err) });
@@ -517,7 +562,7 @@ function lanIp() {
 
 if (!IS_VERCEL) {
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`YT Downloader running (Node.js + youtubei.js, iOS client) (ffmpeg: ${HAS_FFMPEG ? "yes" : "no"})`);
+    console.log(`YT Downloader running (Node.js + youtubei.js, ${process.env.YOUTUBE_COOKIE ? "Android VR client, signed in" : "iOS client"}) (ffmpeg: ${HAS_FFMPEG ? "yes" : "no"})`);
     console.log(`  Local:   http://127.0.0.1:${PORT}`);
     console.log(`  Network: http://${lanIp()}:${PORT}`);
   });

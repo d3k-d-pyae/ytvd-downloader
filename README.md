@@ -15,7 +15,7 @@ A lightweight, self-hosted web app for downloading YouTube videos and audio. Pas
 ## Tech Stack
 
 - **Backend:** Node.js, Express
-- **YouTube extraction:** [youtubei.js](https://github.com/LuanRT/YouTube.js) (InnerTube iOS client, raw `/player` responses)
+- **YouTube extraction:** [youtubei.js](https://github.com/LuanRT/YouTube.js) (InnerTube iOS client anonymously; Android VR client when `YOUTUBE_COOKIE` is set)
 - **Media processing:** ffmpeg (bundled via ffmpeg-static)
 
 ## Prerequisites
@@ -72,6 +72,7 @@ The app auto-detects Vercel and switches to synchronous downloads: `/api/downloa
 
 1. Push this repo to GitHub and import it at [vercel.com/new](https://vercel.com/new).
 2. No configuration needed - Express is detected from `server.js`, and `vercel.json` raises the function timeout to 300 s while including the bundled ffmpeg binary.
+3. Strongly recommended for cloud runs: add a `YOUTUBE_COOKIE` environment variable containing your browser's YouTube cookie header (DevTools > Network > any youtube.com request > request header `Cookie`). Signed-in requests bypass YouTube's datacenter bot-check; refresh the value when it expires.
 
 Know the limits before relying on it: serverless responses are capped around 4.5 MB, so only short clips and MP3 extracts make it through, and YouTube often bot-checks datacenter IPs, which can make downloads fail regardless of the app itself. Local hosting remains the reliable option.
 
