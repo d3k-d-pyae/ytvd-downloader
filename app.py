@@ -112,16 +112,24 @@ def run_download(url, quality, workdir, bar):
         with yt_dlp.YoutubeDL(o) as ydl:
             ydl.download([url])
 
-    try:
-        _download(opts)
-    except yt_dlp.utils.DownloadError as err:
-        msg = str(err)
-        if "403" not in msg and "Forbidden" not in msg:
-            raise
-        bar.progress(5, text="Retrying with alternate YouTube client...")
-        alt = dict(opts)
-        alt["player_client"] = ["tv_simply", "tv"]
-        _download(alt)
+    chains = [
+        (None, "Starting download..."),
+        (["visionos", "web_embedded"], "Retrying with alternate YouTube client..."),
+        (["tv_simply", "tv", "mweb"], "Retrying with second alternate client..."),
+    ]
+    for i, (clients, note) in enumerate(chains):
+        attempt = dict(opts)
+        if clients:
+            attempt["extractor_args"] = {"youtube": {"player_client": clients}}
+        try:
+            _download(attempt)
+            break
+        except yt_dlp.utils.DownloadError as err:
+            msg = str(err)
+            is_last = i == len(chains) - 1
+            if is_last or ("403" not in msg and "Forbidden" not in msg):
+                raise
+            bar.progress(min(5 * (i + 2), 20), text=note)
 
     files = [
         f for f in os.listdir(workdir)
