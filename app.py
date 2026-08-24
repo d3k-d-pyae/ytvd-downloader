@@ -6,6 +6,7 @@ import secrets
 import shutil
 import tempfile
 import threading
+import time
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 import yt_dlp
@@ -32,7 +33,7 @@ def cookie_file():
     return target
 
 
-def base_opts():
+def base_opts(use_cookies=True):
     opts = {
         "quiet": True,
         "no_warnings": False,
@@ -41,9 +42,10 @@ def base_opts():
         "retries": 3,
         "js_runtimes": {"node": {}},
     }
-    cookies = cookie_file()
-    if cookies:
-        opts["cookiefile"] = cookies
+    if use_cookies:
+        cookies = cookie_file()
+        if cookies:
+            opts["cookiefile"] = cookies
     return opts
 
 
@@ -148,29 +150,46 @@ def make_progress_hook(job_id):
 def run_job(job_id, url, quality):
     workdir = tempfile.mkdtemp(prefix="ytdl-job-")
     try:
-        opts = base_opts()
-        opts.update(
-            {
-                "outtmpl": os.path.join(workdir, "%(title).180B.%(ext)s"),
-                "progress_hooks": [make_progress_hook(job_id)],
-            }
-        )
-        if quality == "mp3":
-            opts["format"] = "bestaudio/best"
-            opts["postprocessors"] = [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "0"}
-            ]
-        else:
-            height = int(quality.rstrip("p"))
-            opts["format"] = (
-                f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
-                f"bestvideo[height<={height}]+bestaudio/"
-                f"best[height<={height}]/best"
+        chains = [
+            (True, None),
+            (True, ["visionos", "web_embedded"]),
+            (False, None),
+            (False, ["visionos", "web_embedded"]),
+            (False, ["tv_simply", "tv", "mweb"]),
+        ]
+        for i, (use_cookies, clients) in enumerate(chains):
+            opts = base_opts(use_cookies)
+            opts.update(
+                {
+                    "outtmpl": os.path.join(workdir, "%(title).180B.%(ext)s"),
+                    "progress_hooks": [make_progress_hook(job_id)],
+                }
             )
-            opts["merge_output_format"] = "mp4/mkv"
+            if clients:
+                opts["extractor_args"] = {"youtube": {"player_client": clients}}
+            if quality == "mp3":
+                opts["format"] = "bestaudio/best"
+                opts["postprocessors"] = [
+                    {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "0"}
+                ]
+            else:
+                height = int(quality.rstrip("p"))
+                opts["format"] = (
+                    f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
+                    f"bestvideo[height<={height}]+bestaudio/"
+                    f"best[height<={height}]/best"
+                )
+                opts["merge_output_format"] = "mp4/mkv"
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
+                break
+            except yt_dlp.utils.DownloadError as err:
+                if i == len(chains) - 1:
+                    raise
+                time.sleep(4)
+                set_job(job_id, status="queued", progress=0, note=f"Retrying ({i + 2}/{len(chains)})...")
 
         files = [
             f for f in os.listdir(workdir)
