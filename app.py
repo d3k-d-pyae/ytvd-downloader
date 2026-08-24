@@ -194,6 +194,14 @@ if url:
                 )
         except Exception as err:
             bar.empty()
-            st.error(str(err).splitlines()[0])
+            msg = str(err).splitlines()[0]
+            if "403" in msg or "Forbidden" in msg:
+                st.error(
+                    "YouTube blocks file downloads from cloud-server IPs (403 Forbidden), "
+                    "even though video info is shown. Run the app locally to download: "
+                    "streamlit run app.py"
+                )
+            else:
+                st.error(msg)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)

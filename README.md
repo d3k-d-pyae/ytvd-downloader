@@ -60,6 +60,6 @@ packages.txt      apt packages for Streamlit Cloud (ffmpeg, nodejs)
 ## Notes
 
 - Keep downloads under ~450 MB; larger results exceed what the app can hand through the browser session.
+- **Cloud deployments (Streamlit Cloud etc.) can show video info but cannot download files:** YouTube's CDN returns `403 Forbidden` for media requests coming from datacenter IPs. This affects every yt-dlp client setting; it is enforced server-side by Google. Running the app locally on a home connection works fully - that is the intended way to use it.
 - YouTube changes its internals regularly; keeping `yt-dlp` updated (`pip install -U yt-dlp`) fixes most breakages.
-- Cloud providers' IPs sometimes get bot-checked by YouTube regardless of this app; running locally is always the most reliable option.
 - Only download content you have the rights to; this tool is for personal use.
