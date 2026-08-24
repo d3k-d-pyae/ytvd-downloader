@@ -22,7 +22,7 @@ A lightweight YouTube downloader with a simple browser UI. Paste a link, pick a 
 
 1. Fork or push this repo to GitHub.
 2. At [share.streamlit.io](https://share.streamlit.io), click **New app**, pick the repo and branch.
-3. Set **Main file path** to `streamlit_app.py` and click **Deploy**.
+3. Set **Main file path** to `app.py` and click **Deploy**.
 
 That's it - `requirements.txt` installs the Python dependencies, and `packages.txt` tells the cloud to apt-install `ffmpeg` and `nodejs` (both required by yt-dlp).
 
@@ -34,13 +34,13 @@ Requires Python 3.10+. ffmpeg and node are needed on your PATH (on Windows: `win
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt   # Windows
 .venv/bin/python -m pip install -r requirements.txt       # macOS/Linux
-.venv\Scripts\python -m streamlit run streamlit_app.py    # or .venv/bin/python ...
+.venv\Scripts\python -m streamlit run app.py    # or .venv/bin/python ...
 ```
 
 Then open http://localhost:8501. To reach the app from other devices on your network:
 
 ```bash
-.venv\Scripts\python -m streamlit run streamlit_app.py --server.address 0.0.0.0
+.venv\Scripts\python -m streamlit run app.py --server.address 0.0.0.0
 ```
 
 ## How It Works
@@ -52,7 +52,7 @@ Then open http://localhost:8501. To reach the app from other devices on your net
 ## Project Structure
 
 ```
-streamlit_app.py  The whole app: yt-dlp pipeline + Streamlit UI
+app.py  The whole app: yt-dlp pipeline + Streamlit UI
 requirements.txt  Python dependencies
 packages.txt      apt packages for Streamlit Cloud (ffmpeg, nodejs)
 ```
