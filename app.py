@@ -108,8 +108,20 @@ def run_download(url, quality, workdir, bar):
         )
         opts["merge_output_format"] = "mp4/mkv"
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
+    def _download(o):
+        with yt_dlp.YoutubeDL(o) as ydl:
+            ydl.download([url])
+
+    try:
+        _download(opts)
+    except yt_dlp.utils.DownloadError as err:
+        msg = str(err)
+        if "403" not in msg and "Forbidden" not in msg:
+            raise
+        bar.progress(5, text="Retrying with alternate YouTube client...")
+        alt = dict(opts)
+        alt["player_client"] = ["tv_simply", "tv"]
+        _download(alt)
 
     files = [
         f for f in os.listdir(workdir)
