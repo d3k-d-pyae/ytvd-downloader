@@ -9,7 +9,6 @@ const { Readable, Transform } = require("stream");
 const { pipeline } = require("stream/promises");
 
 const express = require("express");
-const { Innertube, ClientType } = require("youtubei.js");
 
 const BASE_DIR = __dirname;
 const PUBLIC_DIR = path.join(BASE_DIR, "public");
@@ -70,8 +69,17 @@ const HAS_FFMPEG = hasFFmpeg();
 let ytSessionPromise = null;
 // The WEB client enforces PO tokens and returns formats without usable stream
 // URLs; the iOS client still serves plain, ready-to-use URLs.
+// youtubei.js is required on first use so a failed import cannot crash boot.
 function getSession() {
-  if (!ytSessionPromise) ytSessionPromise = Innertube.create({ client_type: ClientType.IOS });
+  if (!ytSessionPromise) {
+    ytSessionPromise = (async () => {
+      const { Innertube, ClientType } = require("youtubei.js");
+      return Innertube.create({ client_type: ClientType.IOS });
+    })().catch((err) => {
+      ytSessionPromise = null;
+      throw err;
+    });
+  }
   return ytSessionPromise;
 }
 
