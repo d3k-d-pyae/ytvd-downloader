@@ -37,7 +37,7 @@ Local:   http://127.0.0.1:5000
 Network: http://<your-lan-ip>:5000   (printed at startup)
 ```
 
-Finished files land in the `downloads/` folder inside the project directory.
+Processed files are streamed straight to your browser as a download; the server keeps no copy. Where they land is up to your browser settings - enable "Ask where to save each file" in Chrome (or the equivalent elsewhere) to pick a folder every time.
 
 ## How It Works
 
@@ -61,7 +61,6 @@ Finished files land in the `downloads/` folder inside the project directory.
 ```
 server.js     Express server and download pipeline
 static/       Frontend (vanilla HTML/CSS/JS)
-downloads/    Finished files (created automatically)
 ```
 
 ## Notes

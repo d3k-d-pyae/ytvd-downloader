@@ -12,9 +12,24 @@ const express = require("express");
 const { Innertube, ClientType } = require("youtubei.js");
 
 const BASE_DIR = __dirname;
-const DOWNLOAD_DIR = path.join(BASE_DIR, "downloads");
 const STATIC_DIR = path.join(BASE_DIR, "static");
-fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+const WORK_DIR = path.join(os.tmpdir(), "ytvd-downloader");
+fs.mkdirSync(WORK_DIR, { recursive: true });
+
+// Sweep outputs abandoned by previous runs (finished jobs nobody fetched).
+try {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  for (const name of fs.readdirSync(WORK_DIR)) {
+    const p = path.join(WORK_DIR, name);
+    try {
+      if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p);
+    } catch {
+      /* best effort */
+    }
+  }
+} catch {
+  /* best effort */
+}
 
 const PORT = 5000;
 
@@ -242,7 +257,7 @@ async function runJob(state, videoId, quality) {
     if (quality === "mp3") {
       if (!HAS_FFMPEG) throw new Error("MP3 extraction requires ffmpeg on this machine.");
       const audio = pickAudio(media.formats);
-      const audioPath = path.join(DOWNLOAD_DIR, `${state.download_id}.audio.tmp`);
+      const audioPath = path.join(WORK_DIR, `${state.download_id}.audio.tmp`);
       tempFiles.push(audioPath);
 
       const total = Number(audio.size || 0);
@@ -258,7 +273,7 @@ async function runJob(state, videoId, quality) {
       state.status = "processing";
       state.speed = null;
       state.eta = null;
-      const outPath = path.join(DOWNLOAD_DIR, `${baseName}.mp3`);
+      const outPath = path.join(WORK_DIR, `${baseName}.mp3`);
       await runFFmpeg(["-y", "-i", audioPath, "-vn", "-codec:a", "libmp3lame", "-q:a", "0", outPath]);
       state.filename = path.basename(outPath);
     } else {
@@ -266,8 +281,8 @@ async function runJob(state, videoId, quality) {
       const video = pickVideo(media.formats, height);
       const audio = pickAudio(media.formats);
 
-      const videoPath = path.join(DOWNLOAD_DIR, `${state.download_id}.video.tmp`);
-      const audioPath = path.join(DOWNLOAD_DIR, `${state.download_id}.audio.tmp`);
+      const videoPath = path.join(WORK_DIR, `${state.download_id}.video.tmp`);
+      const audioPath = path.join(WORK_DIR, `${state.download_id}.audio.tmp`);
       tempFiles.push(videoPath, audioPath);
 
       const vTotal = Number(video.size || 0);
@@ -301,7 +316,7 @@ async function runJob(state, videoId, quality) {
         String(video.mime || "").includes("mp4") && String(audio.mime || "").includes("mp4")
           ? "mp4"
           : "mkv";
-      const outPath = path.join(DOWNLOAD_DIR, `${baseName}.${mergedExt}`);
+      const outPath = path.join(WORK_DIR, `${baseName}.${mergedExt}`);
       const args = ["-y", "-i", videoPath, "-i", audioPath, "-c", "copy"];
       if (mergedExt === "mp4") args.push("-movflags", "+faststart");
       args.push(outPath);
@@ -403,10 +418,14 @@ app.get("/api/file/:id", (req, res) => {
   const state = downloads.get(req.params.id);
   if (!state) return res.status(404).json({ error: "unknown download id" });
   if (state.status !== "finished") return res.status(409).json({ error: "not finished" });
-  if (!state.filename) return res.status(404).json({ error: "file missing" });
-  const filePath = path.join(DOWNLOAD_DIR, state.filename);
+  if (!state.filename) return res.status(409).json({ error: "file already delivered" });
+  const filePath = path.join(WORK_DIR, state.filename);
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: "file missing" });
-  res.download(filePath, state.filename);
+  // Stream once, straight to the requester; the server keeps no copy.
+  res.download(filePath, state.filename, () => {
+    removeQuiet(filePath);
+    state.filename = null;
+  });
 });
 
 // JSON error handler (bad request bodies etc.)
