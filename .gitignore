@@ -1,6 +1,9 @@
-node_modules/
-downloads/
-.codegraph/
-.omo/
+.venv/
+__pycache__/
+*.pyc
 *.log
 *.pid
+.codegraph/
+.omo/
+.claude/
+node_modules/

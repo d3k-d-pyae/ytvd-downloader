@@ -9,42 +9,51 @@ A lightweight, self-hosted web app for downloading YouTube videos and audio. Pas
 - Per-quality selection for every resolution YouTube serves
 - MP3 extraction at highest VBR quality
 - Live progress bar with speed and ETA
-- Video and audio streams download in parallel, then merge losslessly via ffmpeg
+- Files are named after the video title when saved by your browser
+- Stream-once delivery: nothing is kept on the server after you download it
 - LAN friendly: start it once and download from any device on your network
 
 ## Tech Stack
 
-- **Backend:** Node.js, Express
-- **YouTube extraction:** [youtubei.js](https://github.com/LuanRT/YouTube.js) (InnerTube iOS client anonymously; Android VR client when `YOUTUBE_COOKIE` is set)
-- **Media processing:** ffmpeg (bundled via ffmpeg-static)
+- **Backend:** Python 3.12, Flask, waitress
+- **YouTube extraction:** [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- **Media processing:** ffmpeg (system binary)
+- **Deployment:** Docker
 
-## Prerequisites
+## Getting Started (native)
 
-- Node.js 18 or newer
-- ffmpeg ships bundled via [ffmpeg-static](https://www.npmjs.com/package/ffmpeg-static); a system install on PATH is used as fallback
-
-## Getting Started
+Requires Python 3.10+ and ffmpeg on your PATH.
 
 ```bash
-npm install
-node server.js
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt   # Windows
+.venv/bin/python -m pip install -r requirements.txt       # macOS/Linux
+.venv\Scripts\python app.py                               # or .venv/bin/python app.py
 ```
 
 Then open:
 
 ```
 Local:   http://127.0.0.1:5000
-Network: http://<your-lan-ip>:5000   (printed at startup)
+Network: http://<your-lan-ip>:5000
 ```
+
+## Running with Docker
+
+```bash
+docker build -t ytvd-downloader .
+docker run -d --name ytvd -p 5000:5000 ytvd-downloader
+```
+
+The image bundles ffmpeg and a JavaScript runtime (required by recent yt-dlp for YouTube extraction), so no host dependencies are needed. Set `-e PORT=8080` and `-p 8080:8080` to change the port.
 
 Processed files are streamed straight to your browser as a download; the server keeps no copy. Where they land is up to your browser settings - enable "Ask where to save each file" in Chrome (or the equivalent elsewhere) to pick a folder every time.
 
 ## How It Works
 
-1. The server requests YouTube's InnerTube player response using the iOS client context, which still returns direct stream URLs.
-2. `/api/info` lists every available video height plus an MP3 option with expected file sizes.
-3. On download, the selected video track and best audio track are fetched concurrently with weighted progress tracking, then combined with `ffmpeg -c copy` (MP4 when both tracks are MP4-family, otherwise MKV).
-4. MP3 jobs transcode the best audio-only stream with libmp3lame at VBR quality 0.
+1. `/api/info` asks yt-dlp for the format list and shows every available video height plus an MP3 option with expected sizes (bitrate-estimated where YouTube omits exact sizes).
+2. On download, yt-dlp grabs the best video track up to the chosen height plus best audio, merging them with ffmpeg (MP4 preferred, MKV fallback). MP3 jobs transcode the best audio stream at VBR quality 0.
+3. Progress is reported live through `/api/progress/:id`; the finished file streams once through `/api/file/:id` and is deleted from the server the moment delivery completes.
 
 ## API
 
@@ -54,29 +63,18 @@ Processed files are streamed straight to your browser as a download; the server 
 | POST | `/api/info` | Body `{ "url": "..." }`, returns metadata plus available qualities |
 | POST | `/api/download` | Body `{ "url": "...", "quality": "720p" }` or `"mp3"`, returns a `download_id` |
 | GET | `/api/progress/:id` | Live job state: progress %, speed, ETA, status, filename |
-| GET | `/api/file/:id` | Serves the finished file as an attachment |
-
-On local runs `/api/download` returns a `download_id` that `/api/progress` and `/api/file` track; on Vercel it streams the finished file straight back instead.
+| GET | `/api/file/:id` | Streams the finished file as an attachment; single-use (409 afterwards) |
 
 ## Project Structure
 
 ```
-server.js     Express server and download pipeline
-public/       Frontend (vanilla HTML/CSS/JS)
-vercel.json   Function timeout + bundled ffmpeg include for Vercel
+app.py            Flask server and download pipeline
+public/           Frontend (vanilla HTML/CSS/JS)
+requirements.txt  Python dependencies
+Dockerfile        Container image (ffmpeg + JS runtime included)
 ```
-
-## Deploying to Vercel
-
-The app auto-detects Vercel and switches to synchronous downloads: `/api/download` processes the request and streams the finished file straight back, so there is no progress polling in that mode.
-
-1. Push this repo to GitHub and import it at [vercel.com/new](https://vercel.com/new).
-2. No configuration needed - Express is detected from `server.js`, and `vercel.json` raises the function timeout to 300 s while including the bundled ffmpeg binary.
-3. Strongly recommended for cloud runs: add a `YOUTUBE_COOKIE` environment variable containing your browser's YouTube cookie header (DevTools > Network > any youtube.com request > request header `Cookie`). Signed-in requests bypass YouTube's datacenter bot-check; refresh the value when it expires.
-
-Know the limits before relying on it: serverless responses are capped around 4.5 MB, so only short clips and MP3 extracts make it through, and YouTube often bot-checks datacenter IPs, which can make downloads fail regardless of the app itself. Local hosting remains the reliable option.
 
 ## Notes
 
-- YouTube changes its internals regularly; if downloads break, updating `youtubei.js` usually fixes it.
+- YouTube changes its internals regularly; keeping `yt-dlp` updated (`pip install -U yt-dlp`) fixes most breakages.
 - Only download content you have the rights to; this tool is for personal use.
