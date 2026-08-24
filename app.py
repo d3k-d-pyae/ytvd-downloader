@@ -24,10 +24,12 @@ def cookie_file():
         "/etc/secrets/cookies.txt",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
     ]
-    for path in candidates:
-        if path and os.path.isfile(path):
-            return path
-    return None
+    src = next((p for p in candidates if p and os.path.isfile(p)), None)
+    if not src:
+        return None
+    target = os.path.join(tempfile.gettempdir(), "ytvd-cookies.txt")
+    shutil.copyfile(src, target)
+    return target
 
 
 def base_opts():
