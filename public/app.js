@@ -19,7 +19,7 @@ const els = {
   downloadsList: $("#downloads-list"),
 };
 
-const state = { url: null, title: null, qualities: [], selected: null };
+const state = { url: null, title: null, qualities: [], selected: null, mode: "job" };
 const downloads = new Map();
 
 const MUSIC_SVG =
@@ -93,6 +93,7 @@ async function fetchInfo(event) {
     state.url = url;
     state.title = data.title;
     state.qualities = data.qualities || [];
+    state.mode = data.mode === "direct" ? "direct" : "job";
     renderVideo(data);
     renderQualities();
   } catch (err) {
@@ -159,15 +160,19 @@ async function startDownload() {
   hideError();
   els.downloadBtn.disabled = true;
   try {
-    const res = await fetch("/api/download", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: state.url, quality: state.selected }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Could not start the download.");
-    addDownloadCard(data.download_id, state.title, state.selected);
-    poll(data.download_id);
+    if (state.mode === "direct") {
+      await directDownload();
+    } else {
+      const res = await fetch("/api/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: state.url, quality: state.selected }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not start the download.");
+      addDownloadCard(data.download_id, state.title, state.selected);
+      poll(data.download_id);
+    }
   } catch (err) {
     showError(err.message || "Could not start the download.");
   } finally {
@@ -175,7 +180,50 @@ async function startDownload() {
   }
 }
 
-function addDownloadCard(id, title, quality) {
+async function directDownload() {
+  const label = `${state.title || "Video"} - ${state.selected === "mp3" ? "MP3" : state.selected}`;
+  const entry = buildCard(label);
+  setChip(entry, "Processing", "chip-processing");
+  entry.pct.textContent = "";
+  entry.sub.textContent = "Downloading and converting...";
+  let blobUrl = null;
+  try {
+    const res = await fetch("/api/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: state.url, quality: state.selected }),
+    });
+    if (!res.ok) {
+      let message = "Could not process this download.";
+      try {
+        const data = await res.json();
+        if (data && data.error) message = data.error;
+      } catch {
+        /* error body was not JSON */
+      }
+      throw new Error(message);
+    }
+    const ext = state.selected === "mp3" ? ".mp3" : ".mp4";
+    const name =
+      filenameFromDisposition(res.headers.get("content-disposition")) ||
+      `${state.title || "download"}${ext}`;
+    const blob = await res.blob();
+    blobUrl = URL.createObjectURL(blob);
+    saveBlob(blobUrl, name);
+    setChip(entry, "Finished", "chip-finished");
+    entry.fill.classList.remove("indeterminate");
+    entry.fill.style.width = "100%";
+    entry.pct.textContent = "100%";
+    entry.sub.textContent = "";
+    entry.foot.classList.remove("hidden");
+    entry.saveBtn.addEventListener("click", () => saveBlob(blobUrl, name));
+  } catch (err) {
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+    finishWithError(entry, err.message || "Download failed.");
+  }
+}
+
+function buildCard(titleText) {
   els.downloadsSection.classList.remove("hidden");
 
   const card = document.createElement("div");
@@ -185,7 +233,7 @@ function addDownloadCard(id, title, quality) {
   head.className = "dl-head";
   const name = document.createElement("span");
   name.className = "dl-title";
-  name.textContent = `${title || "Video"} - ${quality === "mp3" ? "MP3" : quality}`;
+  name.textContent = titleText;
   const chip = document.createElement("span");
   chip.className = "chip chip-downloading";
   chip.textContent = "Starting";
@@ -212,13 +260,32 @@ function addDownloadCard(id, title, quality) {
   saveBtn.type = "button";
   saveBtn.className = "btn btn-small";
   saveBtn.textContent = "Save again";
-  saveBtn.addEventListener("click", () => triggerSave(id));
   foot.appendChild(saveBtn);
 
   card.append(head, bar, stats, foot);
   els.downloadsList.prepend(card);
 
-  downloads.set(id, { chip, fill, pct, sub, foot, timer: null, saved: false });
+  return { chip, fill, pct, sub, foot, saveBtn, timer: null, saved: false };
+}
+
+function addDownloadCard(id, title, quality) {
+  const entry = buildCard(`${title || "Video"} - ${quality === "mp3" ? "MP3" : quality}`);
+  entry.saveBtn.addEventListener("click", () => triggerSave(id));
+  downloads.set(id, entry);
+}
+
+function saveBlob(url, filename) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function filenameFromDisposition(value) {
+  const match = value && /filename="([^"]+)"/.exec(value);
+  return match ? match[1] : null;
 }
 
 function poll(id) {

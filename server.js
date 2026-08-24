@@ -12,7 +12,7 @@ const express = require("express");
 const { Innertube, ClientType } = require("youtubei.js");
 
 const BASE_DIR = __dirname;
-const STATIC_DIR = path.join(BASE_DIR, "static");
+const PUBLIC_DIR = path.join(BASE_DIR, "public");
 const WORK_DIR = path.join(os.tmpdir(), "ytvd-downloader");
 fs.mkdirSync(WORK_DIR, { recursive: true });
 
@@ -33,9 +33,31 @@ try {
 
 const PORT = 5000;
 
+// On Vercel the app runs as a single serverless function: downloads become
+// synchronous and stream the finished file straight back to the client.
+const IS_VERCEL = Boolean(process.env.VERCEL);
+
+let FFMPEG_BIN = "ffmpeg";
+try {
+  const bundled = require("ffmpeg-static");
+  if (bundled) {
+    FFMPEG_BIN = bundled;
+    if (process.platform !== "win32") {
+      try {
+        fs.chmodSync(bundled, 0o755);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+} catch {
+  /* ffmpeg-static not installed; fall back to system ffmpeg */
+}
+
 function hasFFmpeg() {
+  if (path.isAbsolute(FFMPEG_BIN)) return fs.existsSync(FFMPEG_BIN);
   try {
-    const result = spawnSync("ffmpeg", ["-version"], { windowsHide: true, stdio: "ignore" });
+    const result = spawnSync(FFMPEG_BIN, ["-version"], { windowsHide: true, stdio: "ignore" });
     return !result.error;
   } catch {
     return false;
@@ -224,7 +246,7 @@ async function downloadUrl(url, destPath, onProgress) {
 
 function runFFmpeg(args) {
   return new Promise((resolve, reject) => {
-    const proc = spawn("ffmpeg", args, { windowsHide: true });
+    const proc = spawn(FFMPEG_BIN, args, { windowsHide: true });
     let stderr = "";
     proc.stderr.on("data", (d) => {
       stderr += d;
@@ -247,17 +269,19 @@ function removeQuiet(file) {
   }
 }
 
-async function runJob(state, videoId, quality) {
+async function processDownload(videoId, quality, hooks = {}) {
+  const onProgress = hooks.onProgress || (() => {});
+  const onPhase = hooks.onPhase || (() => {});
   const tempFiles = [];
   try {
     const media = await fetchPlayer(videoId);
-    state.title = media.title;
+    if (hooks.onTitle) hooks.onTitle(media.title);
     const baseName = `${sanitizeName(media.title)} [${media.id}]`;
 
     if (quality === "mp3") {
       if (!HAS_FFMPEG) throw new Error("MP3 extraction requires ffmpeg on this machine.");
       const audio = pickAudio(media.formats);
-      const audioPath = path.join(WORK_DIR, `${state.download_id}.audio.tmp`);
+      const audioPath = path.join(WORK_DIR, `${crypto.randomBytes(16).toString("hex")}.audio.tmp`);
       tempFiles.push(audioPath);
 
       const total = Number(audio.size || 0);
@@ -265,65 +289,90 @@ async function runJob(state, videoId, quality) {
       await downloadUrl(audio.url, audioPath, (done, headerTotal) => {
         const known = total || headerTotal;
         const s = speedo(done);
-        state.speed = s.speed;
-        state.eta = s.eta;
-        if (known) state.progress = Math.min(99.9, Math.round((done / known) * 990) / 10);
+        onProgress({
+          progress: known ? Math.min(99.9, Math.round((done / known) * 990) / 10) : null,
+          speed: s.speed,
+          eta: s.eta,
+        });
       });
 
-      state.status = "processing";
-      state.speed = null;
-      state.eta = null;
+      onPhase("processing");
       const outPath = path.join(WORK_DIR, `${baseName}.mp3`);
       await runFFmpeg(["-y", "-i", audioPath, "-vn", "-codec:a", "libmp3lame", "-q:a", "0", outPath]);
-      state.filename = path.basename(outPath);
-    } else {
-      const height = parseInt(quality, 10);
-      const video = pickVideo(media.formats, height);
-      const audio = pickAudio(media.formats);
-
-      const videoPath = path.join(WORK_DIR, `${state.download_id}.video.tmp`);
-      const audioPath = path.join(WORK_DIR, `${state.download_id}.audio.tmp`);
-      tempFiles.push(videoPath, audioPath);
-
-      const vTotal = Number(video.size || 0);
-      const aTotal = Number(audio.size || 0);
-      const grandTotal = vTotal + aTotal || 1;
-      const speedo = makeSpeedo(grandTotal);
-      let vDone = 0;
-      let aDone = 0;
-      const update = () => {
-        const s = speedo(vDone + aDone);
-        state.speed = s.speed;
-        state.eta = s.eta;
-        state.progress = Math.min(99.9, Math.round(((vDone + aDone) / grandTotal) * 990) / 10);
-      };
-
-      await Promise.all([
-        downloadUrl(video.url, videoPath, (done) => {
-          vDone = done;
-          update();
-        }),
-        downloadUrl(audio.url, audioPath, (done) => {
-          aDone = done;
-          update();
-        }),
-      ]);
-
-      state.status = "processing";
-      state.speed = null;
-      state.eta = null;
-      const mergedExt =
-        String(video.mime || "").includes("mp4") && String(audio.mime || "").includes("mp4")
-          ? "mp4"
-          : "mkv";
-      const outPath = path.join(WORK_DIR, `${baseName}.${mergedExt}`);
-      const args = ["-y", "-i", videoPath, "-i", audioPath, "-c", "copy"];
-      if (mergedExt === "mp4") args.push("-movflags", "+faststart");
-      args.push(outPath);
-      await runFFmpeg(args);
-      state.filename = path.basename(outPath);
+      return { title: media.title, filename: path.basename(outPath) };
     }
 
+    const height = parseInt(quality, 10);
+    const video = pickVideo(media.formats, height);
+    const audio = pickAudio(media.formats);
+
+    const uid = crypto.randomBytes(16).toString("hex");
+    const videoPath = path.join(WORK_DIR, `${uid}.video.tmp`);
+    const audioPath = path.join(WORK_DIR, `${uid}.audio.tmp`);
+    tempFiles.push(videoPath, audioPath);
+
+    const vTotal = Number(video.size || 0);
+    const aTotal = Number(audio.size || 0);
+    const grandTotal = vTotal + aTotal || 1;
+    const speedo = makeSpeedo(grandTotal);
+    let vDone = 0;
+    let aDone = 0;
+    const report = () => {
+      const s = speedo(vDone + aDone);
+      onProgress({
+        progress: Math.min(99.9, Math.round(((vDone + aDone) / grandTotal) * 990) / 10),
+        speed: s.speed,
+        eta: s.eta,
+      });
+    };
+
+    await Promise.all([
+      downloadUrl(video.url, videoPath, (done) => {
+        vDone = done;
+        report();
+      }),
+      downloadUrl(audio.url, audioPath, (done) => {
+        aDone = done;
+        report();
+      }),
+    ]);
+
+    onPhase("processing");
+    const mergedExt =
+      String(video.mime || "").includes("mp4") && String(audio.mime || "").includes("mp4")
+        ? "mp4"
+        : "mkv";
+    const outPath = path.join(WORK_DIR, `${baseName}.${mergedExt}`);
+    const args = ["-y", "-i", videoPath, "-i", audioPath, "-c", "copy"];
+    if (mergedExt === "mp4") args.push("-movflags", "+faststart");
+    args.push(outPath);
+    await runFFmpeg(args);
+    return { title: media.title, filename: path.basename(outPath) };
+  } finally {
+    for (const file of tempFiles) removeQuiet(file);
+  }
+}
+
+async function runJob(state, videoId, quality) {
+  try {
+    const { filename } = await processDownload(videoId, quality, {
+      onTitle: (t) => {
+        state.title = t;
+      },
+      onProgress: (u) => {
+        if (u.progress != null) state.progress = u.progress;
+        state.speed = u.speed;
+        state.eta = u.eta;
+      },
+      onPhase: (phase) => {
+        if (phase === "processing") {
+          state.status = "processing";
+          state.speed = null;
+          state.eta = null;
+        }
+      },
+    });
+    state.filename = filename;
     state.status = "finished";
     state.progress = 100;
     state.error = null;
@@ -332,14 +381,12 @@ async function runJob(state, videoId, quality) {
     state.speed = null;
     state.eta = null;
     state.error = cleanError(err);
-  } finally {
-    for (const file of tempFiles) removeQuiet(file);
   }
 }
 
 const app = express();
 app.use(express.json());
-app.use("/static", express.static(STATIC_DIR));
+app.use(express.static(PUBLIC_DIR));
 
 /** download_id -> state */
 const downloads = new Map();
@@ -358,7 +405,7 @@ function newState(id) {
 }
 
 app.get("/", (_req, res) => {
-  res.sendFile(path.join(STATIC_DIR, "index.html"));
+  res.sendFile(path.join(PUBLIC_DIR, "index.html"));
 });
 
 app.post("/api/info", async (req, res) => {
@@ -375,13 +422,14 @@ app.post("/api/info", async (req, res) => {
       duration: media.duration,
       thumbnail: media.thumbnail,
       qualities: buildQualities(media.formats),
+      mode: IS_VERCEL ? "direct" : "job",
     });
   } catch (err) {
     return res.status(400).json({ error: cleanError(err) });
   }
 });
 
-app.post("/api/download", (req, res) => {
+app.post("/api/download", async (req, res) => {
   const body = req.body || {};
   const url = String(body.url || "").trim();
   const quality = String(body.quality || "").trim().toLowerCase();
@@ -391,14 +439,23 @@ app.post("/api/download", (req, res) => {
   if (!videoId) return res.status(400).json({ error: "That does not look like a YouTube URL." });
 
   const isMp3 = quality === "mp3";
-  let height = null;
-  if (!isMp3) {
-    const match = /^(\d+)p$/.exec(quality);
-    if (!match) return res.status(400).json({ error: `Unknown quality '${quality}'.` });
-    height = parseInt(match[1], 10);
+  if (!isMp3 && !/^(\d+)p$/.exec(quality)) {
+    return res.status(400).json({ error: `Unknown quality '${quality}'.` });
   }
   if (isMp3 && !HAS_FFMPEG) {
     return res.status(400).json({ error: "MP3 extraction requires ffmpeg on this machine." });
+  }
+
+  // Serverless mode has no background workers: process inline and stream the file back.
+  if (IS_VERCEL) {
+    try {
+      const { filename } = await processDownload(videoId, quality);
+      const filePath = path.join(WORK_DIR, filename);
+      res.download(filePath, filename, () => removeQuiet(filePath));
+    } catch (err) {
+      if (!res.headersSent) res.status(400).json({ error: cleanError(err) });
+    }
+    return;
   }
 
   const id = crypto.randomBytes(16).toString("hex");

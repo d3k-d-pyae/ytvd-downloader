@@ -16,12 +16,12 @@ A lightweight, self-hosted web app for downloading YouTube videos and audio. Pas
 
 - **Backend:** Node.js, Express
 - **YouTube extraction:** [youtubei.js](https://github.com/LuanRT/YouTube.js) (InnerTube iOS client, raw `/player` responses)
-- **Media processing:** ffmpeg
+- **Media processing:** ffmpeg (bundled via ffmpeg-static)
 
 ## Prerequisites
 
 - Node.js 18 or newer
-- ffmpeg available on PATH ([download](https://ffmpeg.org/download.html))
+- ffmpeg ships bundled via [ffmpeg-static](https://www.npmjs.com/package/ffmpeg-static); a system install on PATH is used as fallback
 
 ## Getting Started
 
@@ -56,12 +56,24 @@ Processed files are streamed straight to your browser as a download; the server 
 | GET | `/api/progress/:id` | Live job state: progress %, speed, ETA, status, filename |
 | GET | `/api/file/:id` | Serves the finished file as an attachment |
 
+On local runs `/api/download` returns a `download_id` that `/api/progress` and `/api/file` track; on Vercel it streams the finished file straight back instead.
+
 ## Project Structure
 
 ```
 server.js     Express server and download pipeline
-static/       Frontend (vanilla HTML/CSS/JS)
+public/       Frontend (vanilla HTML/CSS/JS)
+vercel.json   Function timeout + bundled ffmpeg include for Vercel
 ```
+
+## Deploying to Vercel
+
+The app auto-detects Vercel and switches to synchronous downloads: `/api/download` processes the request and streams the finished file straight back, so there is no progress polling in that mode.
+
+1. Push this repo to GitHub and import it at [vercel.com/new](https://vercel.com/new).
+2. No configuration needed - Express is detected from `server.js`, and `vercel.json` raises the function timeout to 300 s while including the bundled ffmpeg binary.
+
+Know the limits before relying on it: serverless responses are capped around 4.5 MB, so only short clips and MP3 extracts make it through, and YouTube often bot-checks datacenter IPs, which can make downloads fail regardless of the app itself. Local hosting remains the reliable option.
 
 ## Notes
 
