@@ -8,3 +8,6 @@ README.md
 Dockerfile
 .dockerignore
 .claude
+.devcontainer
+.venv
+cookies.txt
